@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laboratorio virtual: germinación de semillas</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
+<style>
+  body { font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif; background:#eef3ea; }
+  .soil { background: radial-gradient(circle at 20% 20%, #6b4a2f, #4a3220); }
+  .seed { width:46%; height:64%; border-radius:50%; background:#c89b5e; border:2px solid #8a6134; transition:all .5s; }
+  .seed.dry { background:#e6d6b0; border-color:#b9a575; }
+  .seed.rot { background:#2f3a2a; border-color:#1a2216; }
+  .sprout { display:inline-block; transition: transform .6s ease, opacity .6s; line-height:1; }
+  input[type=range] { accent-color:#2f7d4f; }
+  @media (prefers-reduced-motion: reduce){ *{transition:none!important} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useMemo } = React;
+
+const TOTAL = 20, MAXDAY = 7;
+const CURVE = [0, 0.05, 0.25, 0.5, 0.72, 0.88, 0.96, 1];
+const TEMPS = [
+  { v: 0,  label: "Apagado", sub: "≈20 ºC" },
+  { v: 5,  label: "5 ºC" },
+  { v: 18, label: "18 ºC" },
+  { v: 25, label: "25 ºC" },
+  { v: 32, label: "32 ºC" },
+];
+
+/* ---------- Modelo biológico ---------- */
+const tempFactor = t => ({ 0: 0.75, 5: 0.15, 18: 0.70, 25: 1.0, 32: 0.30 }[t]);
+
+const WATER_PTS = [[0,.05],[10,.40],[15,.90],[20,1],[25,1],[30,.90],[35,.35],[40,.15],[50,.03]];
+function waterFactor(w) {
+  for (let i = 1; i < WATER_PTS.length; i++) {
+    const [x0,y0] = WATER_PTS[i-1], [x1,y1] = WATER_PTS[i];
+    if (w <= x1) return y0 + (y1 - y0) * (w - x0) / (x1 - x0);
+  }
+  return WATER_PTS[WATER_PTS.length - 1][1];
+}
+const lightFactor = on => (on ? 0.75 : 1);
+
+function germinated(cfg) {
+  const rate = 0.95 * tempFactor(cfg.temp) * waterFactor(cfg.water) * lightFactor(cfg.light);
+  return Math.max(0, Math.min(TOTAL, Math.round(TOTAL * rate)));
+}
+const cumulative = (n, d) => Math.round(n * CURVE[d]);
+
+function diagnose(cfg, n) {
+  const p = [];
+  const t = cfg.temp;
+  if (t === 25) p.push("25 ºC es la temperatura ideal: las enzimas de la semilla trabajan a su máximo ritmo.");
+  else if (t === 5) p.push("A 5 ºC el metabolismo se ralentiza tanto que las semillas quedan aletargadas y casi no germinan.");
+  else if (t === 32) p.push("A 32 ºC hay estrés térmico: el calor daña proteínas y enzimas del embrión.");
+  else p.push("Con unos " + (t === 0 ? "20" : "18") + " ºC la temperatura es aceptable, pero no la óptima, así que la germinación es moderada.");
+
+  const w = cfg.water;
+  if (w <= 10) p.push("Con " + w + " ml/día la semilla no puede hidratarse lo suficiente y se desecan.");
+  else if (w >= 35) p.push("Con " + w + " ml/día el sustrato se encharca, falta oxígeno y las semillas se ahogan y pudren.");
+  else p.push("Los " + w + " ml/día mantienen la humedad justa: agua para hidratar la semilla y aire para respirar.");
+
+  if (cfg.light) p.push("La luz encendida reduce la germinación: estas semillas germinan mejor en oscuridad.");
+  else p.push("En oscuridad, como bajo tierra, la semilla germina sin penalización.");
+
+  let cierre;
+  if (n >= 17) cierre = "Resultado: condiciones muy favorables, casi todas germinan.";
+  else if (n >= 11) cierre = "Resultado: buena germinación, aunque alguna variable no es la ideal.";
+  else if (n >= 5) cierre = "Resultado: germinación baja; al menos una variable está limitando el proceso.";
+  else cierre = "Resultado: germinación casi nula; alguna condición es muy adversa.";
+  return [...p, cierre];
+}
+
+/* ---------- Orden fijo (pseudoaleatorio) en que germinan las semillas ---------- */
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function makeRanks(seed) {
+  const r = rng(seed), a = Array.from({ length: TOTAL }, (_, i) => i);
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a; // a[celda] = rango de germinación
+}
+
+/* ---------- Bandeja ---------- */
+function Tray({ id, cfg, set, locked, day, ranks }) {
+  const n = useMemo(() => germinated(cfg), [cfg]);
+  const cum = cumulative(n, day);
+  const pct = Math.round(n / TOTAL * 100);
+  const germDay = rank => { for (let d = 1; d <= MAXDAY; d++) if (rank < cumulative(n, d)) return d; return null; };
+  const done = day === MAXDAY;
+  const badState = cfg.water >= 35 ? "rot" : cfg.water <= 10 ? "dry" : "";
+  const lockCls = locked ? "opacity-60 cursor-not-allowed" : "";
+
+  return (
+    <section className="bg-white rounded-2xl shadow-md p-4 flex flex-col gap-3 border border-emerald-100">
+      <h2 className="text-lg font-bold text-emerald-900">Bandeja {id}</h2>
+
+      {/* Bandeja visual */}
+      <div className="relative soil rounded-xl p-3 overflow-hidden">
+        <div className="grid grid-cols-5 gap-1.5 relative z-10">
+          {ranks.map((rank, i) => {
+            const gd = germDay(rank);
+            const has = gd !== null && day >= gd;
+            const age = has ? day - gd : 0;
+            return (
+              <div key={i} className="aspect-square flex items-center justify-center">
+                {has
+                  ? <span className="sprout text-2xl sm:text-3xl" style={{ transform: `scale(${0.55 + age * 0.15})` }}>{age >= 4 ? "🌿" : "🌱"}</span>
+                  : <div className={"seed " + (day >= 5 ? badState : "")} />}
+              </div>
+            );
+          })}
+        </div>
+        {cfg.light && <div className="absolute inset-0 z-20 pointer-events-none" style={{ background: "linear-gradient(180deg, rgba(255,230,120,.45), rgba(255,230,120,.1))" }} />}
+        {cfg.light && <span className="absolute top-1 right-2 z-30 text-xl">💡</span>}
+      </div>
+
+      {/* Controles */}
+      <div className={"flex flex-col gap-3 " + lockCls}>
+        <div className="flex items-center justify-between">
+          <span className="font-semibold text-sm text-slate-700">Luz artificial</span>
+          <button
+            role="switch" aria-checked={cfg.light} disabled={locked}
+            onClick={() => set({ ...cfg, light: !cfg.light })}
+            className={"relative w-14 h-7 rounded-full transition-colors disabled:cursor-not-allowed " + (cfg.light ? "bg-amber-400" : "bg-slate-300")}>
+            <span className={"absolute top-0.5 left-0.5 w-6 h-6 bg-white rounded-full shadow transition-transform " + (cfg.light ? "translate-x-7" : "")} />
+            <span className="sr-only">Luz</span>
+          </button>
+        </div>
+
+        <label className="block">
+          <div className="flex justify-between text-sm">
+            <span className="font-semibold text-slate-700">Riego diario</span>
+            <span className="font-bold text-sky-700">💧 {cfg.water} ml/día</span>
+          </div>
+          <input type="range" min="0" max="50" step="5" value={cfg.water} disabled={locked}
+            onChange={e => set({ ...cfg, water: +e.target.value })}
+            className="w-full disabled:cursor-not-allowed" />
+        </label>
+
+        <div>
+          <div className="font-semibold text-sm text-slate-700 mb-1">Temperatura</div>
+          <div className="grid grid-cols-5 gap-1">
+            {TEMPS.map(o => (
+              <button key={o.v} disabled={locked} onClick={() => set({ ...cfg, temp: o.v })}
+                className={"rounded-lg py-1.5 text-xs font-semibold border transition disabled:cursor-not-allowed " +
+                  (cfg.temp === o.v ? "bg-emerald-700 text-white border-emerald-800" : "bg-emerald-50 text-emerald-900 border-emerald-200 hover:bg-emerald-100")}>
+                {o.label}{o.sub && <span className="block font-normal text-[10px] opacity-80">{o.sub}</span>}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Resultados */}
+      <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-3">
+        <div className="flex items-end justify-between">
+          <div className="text-xl font-bold text-emerald-900">{cum} de {TOTAL} semillas</div>
+          <div className="text-2xl font-extrabold text-emerald-700">{Math.round(cum / TOTAL * 100)}%</div>
+        </div>
+        <div className="h-2.5 bg-white rounded-full overflow-hidden mt-2">
+          <div className="h-full bg-emerald-500 transition-all duration-500" style={{ width: (cum / TOTAL * 100) + "%" }} />
+        </div>
+        {done ? (
+          <div className="mt-3 text-sm text-slate-800 space-y-1">
+            <div className="font-bold text-emerald-900">Diagnóstico (éxito final: {pct}%)</div>
+            {diagnose(cfg, n).map((t, i) => <p key={i}>{t}</p>)}
+          </div>
+        ) : (
+          <p className="mt-2 text-xs text-slate-500">El diagnóstico aparecerá el Día {MAXDAY}.</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/* ---------- App ---------- */
+const DEFAULT = { light: false, water: 20, temp: 25 };
+
+function App() {
+  const [day, setDay] = useState(0);
+  const [running, setRunning] = useState(false);
+  const [trays, setTrays] = useState([
+    { ...DEFAULT }, { ...DEFAULT, light: true }, { ...DEFAULT, water: 45 }, { ...DEFAULT, temp: 5 },
+  ]);
+  const ranks = useMemo(() => [11, 22, 33, 44].map(makeRanks), []);
+  const locked = day >= 1;
+
+  useEffect(() => {
+    if (!running) return;
+    if (day >= MAXDAY) { setRunning(false); return; }
+    const t = setTimeout(() => setDay(d => d + 1), 900);
+    return () => clearTimeout(t);
+  }, [running, day]);
+
+  const reset = () => { setRunning(false); setDay(0); };
+  const setTray = i => cfg => setTrays(ts => ts.map((t, k) => (k === i ? cfg : t)));
+
+  return (
+    <div className="max-w-6xl mx-auto p-3 sm:p-6">
+      <header className="mb-4">
+        <h1 className="text-2xl sm:text-3xl font-extrabold text-emerald-900">Laboratorio virtual de germinación</h1>
+        <p className="text-slate-600 text-sm sm:text-base mt-1">
+          Configura las condiciones de cada bandeja (20 semillas) en el Día 0. Después avanza el tiempo y observa qué factores favorecen la germinación.
+        </p>
+      </header>
+
+      <div className="sticky top-0 z-40 bg-white/95 backdrop-blur rounded-2xl shadow-md border border-emerald-100 p-3 mb-4 flex flex-wrap items-center gap-3">
+        <div className="flex items-baseline gap-2 mr-auto">
+          <span className="text-sm text-slate-500">Tiempo</span>
+          <span className="text-3xl font-extrabold text-emerald-800">Día {day}</span>
+          <span className="text-sm text-slate-500">de {MAXDAY}</span>
+        </div>
+        <div className="hidden sm:flex gap-1" aria-hidden="true">
+          {Array.from({ length: MAXDAY + 1 }, (_, d) => (
+            <span key={d} className={"w-6 h-2 rounded-full " + (d <= day ? "bg-emerald-600" : "bg-slate-200")} />
+          ))}
+        </div>
+        <button onClick={() => setDay(d => Math.min(MAXDAY, d + 1))} disabled={day >= MAXDAY || running}
+          className="px-4 py-2 rounded-lg bg-emerald-700 text-white font-semibold hover:bg-emerald-800 disabled:opacity-40 disabled:cursor-not-allowed">+1 Día</button>
+        <button onClick={() => setRunning(true)} disabled={day >= MAXDAY || running}
+          className="px-4 py-2 rounded-lg bg-amber-500 text-white font-semibold hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed">
+          {running ? "Simulando…" : "Simular experimento completo"}
+        </button>
+        <button onClick={reset}
+          className="px-4 py-2 rounded-lg border-2 border-slate-400 text-slate-700 font-semibold hover:bg-slate-100">Reiniciar experimento</button>
+        {locked && <p className="w-full text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
+          🔒 Variables bloqueadas mientras dura el experimento. Pulsa «Reiniciar experimento» para cambiarlas.</p>}
+      </div>
+
+      <main className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {trays.map((cfg, i) => (
+          <Tray key={i} id={i + 1} cfg={cfg} set={setTray(i)} locked={locked} day={day} ranks={ranks[i]} />
+        ))}
+      </main>
+
+      <footer className="mt-6 text-xs text-slate-500 text-center">
+        Leyenda: semilla marrón = sin germinar · 🌱 germinando · 🌿 plántula desarrollada · semilla clara = seca · semilla oscura = podrida
+      </footer>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
